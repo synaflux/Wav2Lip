@@ -9,16 +9,16 @@ if not path.isfile('face_detection/detection/sfd/s3fd.pth'):
 	raise FileNotFoundError('Save the s3fd model to face_detection/detection/sfd/s3fd.pth \
 							before running this script!')
 
-import multiprocessing as mp
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import numpy as np
-import argparse, os, cv2, traceback, subprocess
 from tqdm import tqdm
 from glob import glob
+import multiprocessing as mp
+import numpy as np
+import argparse, os, cv2, traceback, subprocess
 import audio
-from hparams import hparams as hp
-
+import time
 import face_detection
+from hparams import hparams as hp
 
 parser = argparse.ArgumentParser()
 
@@ -32,19 +32,11 @@ args = parser.parse_args()
 fa = [face_detection.FaceAlignment(face_detection.LandmarksType._2D, flip_input=False, 
 									device='cuda:{}'.format(id)) for id in range(args.ngpu)]
 
-template = 'ffmpeg -loglevel panic -y -i {} -strict -2 {}'
-# template2 = 'ffmpeg -hide_banner -loglevel panic -threads 1 -y -i {} -async 1 -ac 1 -vn -acodec pcm_s16le -ar 16000 {}'
+# template = 'ffmpeg -loglevel panic -y -i {} -strict -2 {}'
+template = 'ffmpeg -hide_banner -loglevel panic -threads 1 -y -i {} -async 1 -ac 1 -vn -acodec pcm_s16le -ar 16000 {}'
 
 def process_video_file(vfile, args, gpu_id):
 	video_stream = cv2.VideoCapture(vfile)
-	
-	frames = []
-	while 1:
-		still_reading, frame = video_stream.read()
-		if not still_reading:
-			video_stream.release()
-			break
-		frames.append(frame)
 	
 	vidname = os.path.basename(vfile).split('.')[0]
 	dirname = vfile.split('/')[-2]
@@ -52,19 +44,32 @@ def process_video_file(vfile, args, gpu_id):
 	fulldir = path.join(args.preprocessed_root, dirname, vidname)
 	os.makedirs(fulldir, exist_ok=True)
 
-	batches = [frames[i:i + args.batch_size] for i in range(0, len(frames), args.batch_size)]
+	frames = []
+	i = 0
+	start_time = time.time()
+	while 1:
+		still_reading, frame = video_stream.read()
+		
+		frame = cv2.resize(frame, (1280, 720))
+		frames.append(frame)
 
-	i = -1
-	for fb in batches:
-		preds = fa[gpu_id].get_detections_for_batch(np.asarray(fb))
+		if len(frames) >= args.batch_size or not still_reading:
+			preds = fa[gpu_id].get_detections_for_batch(np.asarray(frames))
 
-		for j, f in enumerate(preds):
-			i += 1
-			if f is None:
-				continue
+			for j, f in enumerate(preds):
+				i += 1
+				if f is None:
+					continue
 
-			x1, y1, x2, y2 = f
-			cv2.imwrite(path.join(fulldir, '{}.jpg'.format(i)), fb[j][y1:y2, x1:x2])
+				x1, y1, x2, y2 = f
+				cv2.imwrite(path.join(fulldir, '{}.jpg'.format(i)), frames[j][y1:y2, x1:x2])
+
+			frames = []
+
+		if not still_reading:
+			video_stream.release()
+			break
+	
 
 def process_audio_file(vfile, args):
 	vidname = os.path.basename(vfile).split('.')[0]
@@ -87,6 +92,7 @@ def mp_handler(job):
 		exit(0)
 	except:
 		traceback.print_exc()
+
 		
 def main(args):
 	print('Started processing for {} with {} GPUs'.format(args.data_root, args.ngpu))
