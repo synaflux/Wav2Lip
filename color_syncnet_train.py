@@ -3,6 +3,7 @@ from tqdm import tqdm
 
 from models import SyncNet_color as SyncNet
 import audio
+import time
 
 import torch
 from torch import nn
@@ -33,6 +34,8 @@ print('use_cuda: {}'.format(use_cuda))
 
 syncnet_T = 5
 syncnet_mel_step_size = 16
+
+mel_spec_cache = {}
 
 class Dataset(object):
     def __init__(self, split):
@@ -67,6 +70,7 @@ class Dataset(object):
         return len(self.all_videos)
 
     def __getitem__(self, idx):
+        start_time = time.time()
         while 1:
             idx = random.randint(0, len(self.all_videos) - 1)
             vidname = self.all_videos[idx]
@@ -85,7 +89,7 @@ class Dataset(object):
             else:
                 y = torch.zeros(1).float()
                 chosen = wrong_img_name
-
+            
             window_fnames = self.get_window(chosen)
             if window_fnames is None:
                 continue
@@ -109,10 +113,15 @@ class Dataset(object):
 
             try:
                 wavpath = join(vidname, "audio.wav")
-                wav = audio.load_wav(wavpath, hparams.sample_rate)
+                if mel_spec_cache.get(wavpath) is None:
+                    wav = audio.load_wav(wavpath, hparams.sample_rate)
 
-                orig_mel = audio.melspectrogram(wav).T
+                    orig_mel = audio.melspectrogram(wav).T
+                    mel_spec_cache[wavpath] = orig_mel
+                else:
+                    orig_mel = mel_spec_cache[wavpath]
             except Exception as e:
+                print(e)
                 continue
 
             mel = self.crop_audio_window(orig_mel.copy(), img_name)
@@ -125,8 +134,10 @@ class Dataset(object):
             x = x.transpose(2, 0, 1)
             x = x[:, x.shape[1]//2:]
 
+
             x = torch.FloatTensor(x)
             mel = torch.FloatTensor(mel.T).unsqueeze(0)
+    
 
             return x, mel, y
 
@@ -174,7 +185,7 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
                 with torch.no_grad():
                     eval_model(test_data_loader, global_step, device, model, checkpoint_dir)
 
-            prog_bar.set_description('Loss: {}'.format(running_loss / (step + 1)))
+            prog_bar.set_description('Loss: {}, global_step: {}'.format(running_loss / (step + 1), global_step))
 
         global_epoch += 1
 
@@ -255,11 +266,11 @@ if __name__ == "__main__":
 
     train_data_loader = data_utils.DataLoader(
         train_dataset, batch_size=hparams.syncnet_batch_size, shuffle=True,
-        num_workers=hparams.num_workers)
+        num_workers=0)
 
     test_data_loader = data_utils.DataLoader(
         test_dataset, batch_size=hparams.syncnet_batch_size,
-        num_workers=8)
+        num_workers=0)
 
     device = torch.device("cuda" if use_cuda else "cpu")
 
