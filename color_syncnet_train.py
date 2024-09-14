@@ -35,9 +35,11 @@ print('use_cuda: {}'.format(use_cuda))
 syncnet_T = 5
 syncnet_mel_step_size = 16
 
-mel_spec_cache = {}
 
 class Dataset(object):
+    mel_spec_cache = {}
+    image_list_cache = {}
+
     def __init__(self, split):
         self.all_videos = get_image_list(args.data_root, split)
 
@@ -67,7 +69,7 @@ class Dataset(object):
 
 
     def __len__(self):
-        return len(self.all_videos)
+        return len(self.all_videos) * 64 * 8
 
     def __getitem__(self, idx):
         start_time = time.time()
@@ -75,9 +77,15 @@ class Dataset(object):
             idx = random.randint(0, len(self.all_videos) - 1)
             vidname = self.all_videos[idx]
 
-            img_names = list(glob(join(vidname, '*.jpg')))
+            if self.image_list_cache.get(vidname) is not None:
+                img_names = self.image_list_cache.get(vidname)
+            else:
+                img_names = list(glob(join(vidname, '*.jpg')))
+                self.image_list_cache[vidname] = img_names
+
             if len(img_names) <= 3 * syncnet_T:
                 continue
+
             img_name = random.choice(img_names)
             wrong_img_name = random.choice(img_names)
             while wrong_img_name == img_name:
@@ -89,7 +97,7 @@ class Dataset(object):
             else:
                 y = torch.zeros(1).float()
                 chosen = wrong_img_name
-            
+
             window_fnames = self.get_window(chosen)
             if window_fnames is None:
                 continue
@@ -113,13 +121,13 @@ class Dataset(object):
 
             try:
                 wavpath = join(vidname, "audio.wav")
-                if mel_spec_cache.get(wavpath) is None:
+                if self.mel_spec_cache.get(wavpath) is None:
                     wav = audio.load_wav(wavpath, hparams.sample_rate)
 
                     orig_mel = audio.melspectrogram(wav).T
-                    mel_spec_cache[wavpath] = orig_mel
+                    self.mel_spec_cache[wavpath] = orig_mel
                 else:
-                    orig_mel = mel_spec_cache[wavpath]
+                    orig_mel = self.mel_spec_cache[wavpath]
             except Exception as e:
                 print(e)
                 continue
@@ -134,11 +142,10 @@ class Dataset(object):
             x = x.transpose(2, 0, 1)
             x = x[:, x.shape[1]//2:]
 
-
             x = torch.FloatTensor(x)
             mel = torch.FloatTensor(mel.T).unsqueeze(0)
-    
 
+            # print(f"get item time: {time.time() - start_time}")
             return x, mel, y
 
 logloss = nn.BCELoss()
@@ -153,7 +160,6 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
 
     global global_step, global_epoch
     resumed_step = global_step
-    
     while global_epoch < nepochs:
         running_loss = 0.
         prog_bar = tqdm(enumerate(train_data_loader))
@@ -266,11 +272,11 @@ if __name__ == "__main__":
 
     train_data_loader = data_utils.DataLoader(
         train_dataset, batch_size=hparams.syncnet_batch_size, shuffle=True,
-        num_workers=0)
+        num_workers=16, persistent_workers=True, prefetch_factor=10)
 
     test_data_loader = data_utils.DataLoader(
         test_dataset, batch_size=hparams.syncnet_batch_size,
-        num_workers=0)
+        num_workers=16, persistent_workers=True, prefetch_factor=10)
 
     device = torch.device("cuda" if use_cuda else "cpu")
 

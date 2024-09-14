@@ -38,6 +38,9 @@ syncnet_T = 5
 syncnet_mel_step_size = 16
 
 class Dataset(object):
+    mel_spec_cache = {}
+    image_list_cache = {}
+
     def __init__(self, split):
         self.all_videos = get_image_list(args.data_root, split)
 
@@ -106,13 +109,19 @@ class Dataset(object):
         return x
 
     def __len__(self):
-        return len(self.all_videos)
+        return len(self.all_videos) * 100
 
     def __getitem__(self, idx):
         while 1:
             idx = random.randint(0, len(self.all_videos) - 1)
             vidname = self.all_videos[idx]
-            img_names = list(glob(join(vidname, '*.jpg')))
+            
+            if self.image_list_cache.get(vidname) is not None:
+                img_names = self.image_list_cache.get(vidname)
+            else:
+                img_names = list(glob(join(vidname, '*.jpg')))
+                self.image_list_cache[vidname] = img_names
+            
             if len(img_names) <= 3 * syncnet_T:
                 continue
             
@@ -136,9 +145,13 @@ class Dataset(object):
 
             try:
                 wavpath = join(vidname, "audio.wav")
-                wav = audio.load_wav(wavpath, hparams.sample_rate)
+                if self.mel_spec_cache.get(wavpath) is None:
+                    wav = audio.load_wav(wavpath, hparams.sample_rate)
 
-                orig_mel = audio.melspectrogram(wav).T
+                    orig_mel = audio.melspectrogram(wav).T
+                    self.mel_spec_cache[wavpath] = orig_mel
+                else:
+                    orig_mel = self.mel_spec_cache[wavpath]
             except Exception as e:
                 continue
 
@@ -283,6 +296,10 @@ def eval_model(test_data_loader, global_step, device, model, checkpoint_dir):
             sync_losses.append(sync_loss.item())
             recon_losses.append(l1loss.item())
 
+            averaged_sync_loss = sum(sync_losses) / len(sync_losses)
+            averaged_recon_loss = sum(recon_losses) / len(recon_losses)
+            # print('L1: {}, Sync loss: {}'.format(averaged_recon_loss, averaged_sync_loss))
+
             if step > eval_steps: 
                 averaged_sync_loss = sum(sync_losses) / len(sync_losses)
                 averaged_recon_loss = sum(recon_losses) / len(recon_losses)
@@ -344,11 +361,11 @@ if __name__ == "__main__":
 
     train_data_loader = data_utils.DataLoader(
         train_dataset, batch_size=hparams.batch_size, shuffle=True,
-        num_workers=hparams.num_workers)
+        num_workers=16, persistent_workers=True, prefetch_factor=10)
 
     test_data_loader = data_utils.DataLoader(
         test_dataset, batch_size=hparams.batch_size,
-        num_workers=4)
+        num_workers=16, persistent_workers=True, prefetch_factor=10)
 
     device = torch.device("cuda" if use_cuda else "cpu")
 
